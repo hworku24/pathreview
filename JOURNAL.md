@@ -19,3 +19,17 @@ The issue names the exact two files involved, which kept the search space small 
 **Setup confirmation:** [x] App runs locally at localhost:5173
 
 **Cohort ledger:** [ ] Issue added to cohort ledger
+
+## Week 8 — Reproduction & solution planning
+
+**Reproduction commit link:** https://github.com/hworku24/pathreview/commit/fe5de9b72391da260776b4d717cf08f5a57eb611
+
+**Reproduction summary:**
+I wrote `scripts/reproduce_issue_47.py`, which simulates the API dying partway through an orchestrator run and then re-running the same profile after a restart. On `main`, two tools completed before the crash, the session store was completely empty at crash time, and both tools re-executed from scratch on the re-run, which is exactly the state loss the issue describes. Full steps and observed output are in `docs/issue-47-reproduction.md`.
+
+**PLAN.md link:** https://github.com/hworku24/pathreview/blob/fix/47-agent-state-persistence/PLAN.md
+
+**Walkthrough video (recommended):** Not recorded yet.
+
+**Blockers or open questions:**
+The main open question going into Week 9 is the 1 hour default TTL in `agent/memory/session_store.py`. A long multi-repository review could have its checkpoint expire between a crash and the re-run, so I flagged it under risks in PLAN.md and want to decide whether the checkpoint key needs a longer TTL. I also still need to double check that the routes in `api/` that read session data are unaffected by the new `_in_progress` field.
