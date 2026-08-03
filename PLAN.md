@@ -127,3 +127,40 @@ re-executing them.
   a stale `_in_progress` state.
 * Redis unavailable at checkpoint time: the run finishes anyway with
   in-memory results, and the failure is logged rather than raised.
+
+## Week 9 resolutions
+
+How each open risk landed once the implementation was finished.
+
+* **TTL expiry: resolved by giving the context key its own TTL.**
+  `CONTEXT_TTL_SECONDS` in `context_manager.py` is 24 hours, passed
+  explicitly on every `_persist()` write, so a checkpoint outlives the
+  1 hour default that regular session data uses. A crash and recovery that
+  takes longer than an hour still resumes.
+* **Key collisions: resolved, no reader is affected.** I grepped `api/` and
+  `core/` for `SessionStore` and `session_store` and found no call sites at
+  all. The orchestrator is not wired into any route yet in this repo, so
+  nothing outside `agent/` reads these keys. The `:context` suffix also
+  keeps the new key in its own namespace, and `_in_progress` is removed
+  from the session entry on the completion path before the final write.
+* **Serialization: resolved as planned.** `_serialize()` returns `None` for
+  anything `json.dumps` rejects, the entry is skipped and logged rather
+  than raised, and the in-memory cache keeps the value for the current
+  process. Covered by
+  `test_non_serializable_result_is_skipped_without_error`.
+* **Redis outages: resolved and now tested.** Three tests drive a real
+  `SessionStore` wrapping a Redis client that raises `ConnectionError`, and
+  assert that hydration, write-through, and a full orchestrator run each
+  degrade to in-memory behavior instead of failing.
+* **Write amplification: accepted, not addressed.** Persisting the whole
+  cache after each tool is still O(results) per tool. At the current plan
+  size of about 5 tools this is a handful of small writes, so I left it
+  alone rather than adding incremental-write complexity to a fix that is
+  about correctness. If plans grow, `_persist()` is the single place to
+  change.
+
+One edge case surfaced during implementation that was not in the original
+plan: the context key could hold something other than a dict, either from a
+partial write or from a future writer reusing the namespace. `_hydrate()`
+now type-checks the payload and starts the session cold instead of raising
+on startup.
