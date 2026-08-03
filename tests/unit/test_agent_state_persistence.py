@@ -4,6 +4,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+import redis
 
 from agent.memory.context_manager import ContextManager
 from agent.memory.session_store import SessionStore
@@ -137,6 +138,37 @@ class TestContextManagerPersistence:
         context.store_tool_result("readme_scorer", "abc123", result)
         assert context.get_tool_result("readme_scorer", "abc123") is result
 
+    def test_unexpected_persisted_payload_starts_cold(self) -> None:
+        store = FakeSessionStore()
+        # Something other than this class wrote the key
+        store.data["session:p1:context"] = json.dumps(["not", "a", "dict"])
+
+        context = ContextManager(session_store=store, session_id="p1")
+
+        assert context.get_all_results() == {}
+
+    def test_redis_failure_on_hydrate_is_not_fatal(self) -> None:
+        redis_client = Mock()
+        redis_client.get = Mock(side_effect=redis.ConnectionError("redis is down"))
+        store = SessionStore(redis_client)
+
+        context = ContextManager(session_store=store, session_id="p1")
+
+        assert context.get_all_results() == {}
+
+    def test_redis_failure_on_write_leaves_memory_cache_usable(self) -> None:
+        redis_client = Mock()
+        redis_client.get = Mock(return_value=None)
+        redis_client.setex = Mock(side_effect=redis.ConnectionError("redis is down"))
+        store = SessionStore(redis_client)
+
+        context = ContextManager(session_store=store, session_id="p1")
+        result = ToolResult(success=True, data={"score": 0.9})
+        context.store_tool_result("readme_scorer", "abc123", result)
+
+        # Write failed, but the current process keeps its cache
+        assert context.get_tool_result("readme_scorer", "abc123") is result
+
 
 @pytest.mark.unit
 class TestOrchestratorResume:
@@ -214,3 +246,18 @@ class TestOrchestratorResume:
 
         assert output["tool_results"]["tech_detector"] == {"stack": ["python"]}
         assert len(output["tool_results"]) == 3
+
+    def test_run_completes_when_redis_is_down(self, tools: dict, profile_data: dict) -> None:
+        redis_client = Mock()
+        redis_client.get = Mock(side_effect=redis.ConnectionError("redis is down"))
+        redis_client.setex = Mock(side_effect=redis.ConnectionError("redis is down"))
+        redis_client.delete = Mock(side_effect=redis.ConnectionError("redis is down"))
+        store = SessionStore(redis_client)
+
+        orchestrator = Orchestrator(tools=tools, session_store=store)
+        output = orchestrator.run("p1", profile_data)
+
+        # Checkpointing degrades to the old in-memory behavior instead of
+        # failing the run it exists to protect
+        assert len(output["tool_results"]) == 3
+        assert output["tool_results"]["readme_scorer"] == {"score": 0.8}

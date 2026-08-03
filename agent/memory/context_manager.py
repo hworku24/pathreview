@@ -119,6 +119,16 @@ class ContextManager:
         if not persisted:
             return
 
+        # A key written by something other than this class (or a partially
+        # written value) shouldn't take down startup — start cold instead.
+        if not isinstance(persisted, dict):
+            logger.warning(
+                "context_hydrate_unexpected_payload",
+                session_id=self.session_id,
+                payload_type=type(persisted).__name__,
+            )
+            return
+
         for key, entry in persisted.items():
             self.results[key] = self._deserialize(entry)
 
@@ -140,7 +150,9 @@ class ContextManager:
     @staticmethod
     def _serialize(result: Any) -> dict | None:
         """Convert a cached result to a JSON-safe envelope, or None to skip."""
-        if is_dataclass(result):
+        # `is_dataclass` is true for the class itself as well as instances;
+        # only an instance can go through `asdict`.
+        if is_dataclass(result) and not isinstance(result, type):
             envelope = {"__kind__": "tool_result", "value": asdict(result)}
         else:
             envelope = {"__kind__": "raw", "value": result}
