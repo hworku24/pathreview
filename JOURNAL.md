@@ -55,7 +55,7 @@ Open the PR against `ascherj/pathreview` with the template filled out.
 
 ## Week 9 — Check-in 2 (submission)
 
-**PR link:** PENDING
+**PR link:** https://github.com/ascherj/pathreview/pull/696
 
 **What I built:**
 Write-through persistence and checkpointing so an interrupted review resumes from its last completed tool. Six commits: type annotations required by the mypy pre-commit hook, the core fix, the reproduction script and writeup, PLAN.md, and a hardening commit covering the Redis-down and malformed-payload paths.
