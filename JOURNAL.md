@@ -34,39 +34,62 @@ I wrote `scripts/reproduce_issue_47.py`, which simulates the API dying partway t
 **Blockers or open questions:**
 The main open question going into Week 9 is the 1 hour default TTL in `agent/memory/session_store.py`. A long multi-repository review could have its checkpoint expire between a crash and the re-run, so I flagged it under risks in PLAN.md and want to decide whether the checkpoint key needs a longer TTL. I also still need to double check that the routes in `api/` that read session data are unaffected by the new `_in_progress` field.
 
-## Week 9 — Check-in 1 (mid-week progress)
+## Week 9 — Solution building & PR submission
 
-**Where the implementation stands:**
-The core fix is written and working. `ContextManager` now takes an optional `session_store` and `session_id`, writes the whole result cache through to Redis on every `store_tool_result()`, and rehydrates that cache when a new instance is constructed. `Orchestrator.run()` builds a session-scoped context manager when a store is present and checkpoints after every tool with an `_in_progress` marker carrying `completed_steps`, `total_steps`, and partial results, instead of writing once at the end. The completion path clears both the marker and the context key so a finished review leaves nothing stale behind.
+### Check-in 1 (mid-week)
 
-**Both Week 8 open questions are now closed:**
-The TTL question is answered in code. Rather than change the shared 1 hour default and affect every other session write, I gave the context key its own `CONTEXT_TTL_SECONDS` of 24 hours, passed explicitly on each persist call. A crash plus a slow recovery still resumes.
+**Current progress:**
+Sub-tasks 1 through 4 from PLAN.md are done, and sub-task 5 is partly done.
 
-The key collision question turned out to be a non-issue. I grepped `api/` and `core/` for `SessionStore` and `session_store` and found no call sites at all, so nothing outside `agent/` reads these keys today. The orchestrator is not wired into any route in this repo yet. The `:context` suffix keeps the new key in its own namespace regardless, and `_in_progress` is popped before the final session write.
+Sub-task 1 (write-through and rehydration in `ContextManager`) is complete. `ContextManager.__init__` now takes optional `session_store` and `session_id` parameters, every `store_tool_result()` writes the full cache through to Redis under a session-scoped key (`session:<profile_id>:context`), and construction rehydrates that key into the in-memory dict so a fresh process starts with the completed results.
 
-**What I did beyond the original plan:**
-Two things came out of a self-review against the plan. First, PLAN.md said the Redis outage path needed a test proving it stays non-fatal, and I had not written one, so I added three: hydration when the client raises, write-through when the client raises, and a full orchestrator run against a dead Redis. All three assert the run degrades to in-memory behavior instead of failing the review the checkpointing exists to protect. Second, `_hydrate()` assumed the persisted payload would always be a dict and would have raised on a partial or foreign write, so it now type-checks and starts the session cold instead.
+Sub-task 2 (serialization helpers) is complete. `_serialize()` tags `ToolResult` objects in an envelope so `_deserialize()` can rebuild them after a JSON round trip, and anything `json.dumps` rejects is skipped and logged rather than raised.
 
-**Verification so far:**
-13 unit tests in `tests/unit/test_agent_state_persistence.py`, all passing. The full unit suite is 388 passed with 53 failures, and `main` is 375 passed with the same 53 failures, so the change adds 13 tests and regresses nothing. This repo ships with those 53 pre-existing failures across unrelated modules. `ruff` and `black` pass on every file I touched. `mypy agent/` went from 18 errors on `main` to 5, all 5 pre-existing in `market_analyzer.py`, which I left alone as out of scope.
+Sub-task 3 (orchestrator checkpointing) is complete. `Orchestrator.run()` builds a session-scoped context manager when a store is present and calls `_checkpoint()` after every tool with an `_in_progress` marker carrying `completed_steps`, `total_steps`, and `partial_results`, instead of writing once at the end.
 
-**Remaining before submission:**
-Open the PR against `ascherj/pathreview` with the template filled out.
+Sub-task 4 (cleanup on completion) is complete. The success path pops `_in_progress`, writes the final results, and calls `context.clear_persisted()` so a finished review leaves no stale checkpoint behind.
 
-## Week 9 — Check-in 2 (submission)
+Sub-task 5 (tests and end-to-end verification) is in progress. `tests/unit/test_agent_state_persistence.py` currently has 13 passing tests, and `scripts/reproduce_issue_47.py` prints BUG REPRODUCED on `main` and FIXED BEHAVIOR on this branch.
+
+Both Week 8 open questions are also now closed. The TTL question is answered in code: rather than raise the shared 1 hour default and affect every other session write, the context key gets its own `CONTEXT_TTL_SECONDS` of 24 hours, passed explicitly on each persist call. The key collision question turned out to be a non-issue, because grepping `api/` and `core/` for `SessionStore` and `session_store` returns no call sites at all, so nothing outside `agent/` reads these keys today.
+
+**Next steps:**
+Finish sub-task 5 by running the full unit suite against both branches and recording the pre-existing failure counts, since this repo ships with failures unrelated to issue #47 and I need a documented baseline before I can claim I did not regress anything. Then rebase onto `upstream/main`, run the `make check` pieces on both branches to confirm no new lint or type errors, write the PR description with the reproduction steps and the pre-existing failure documentation, and open the PR.
+
+**Blockers:**
+No hard blockers. Two things are shaping the work. First, `make check` and `make test-unit` both fail on a clean `main` checkout, so "passes" here has to mean "introduces no new failures" and I need before-and-after numbers to show that. Second, the orchestrator is not wired into any route in `api/` in this repo, so I cannot exercise this through the running app and have to verify through unit tests and the reproduction script instead.
+
+---
+
+### Check-in 2 (end of week)
 
 **PR link:** https://github.com/ascherj/pathreview/pull/696
 
-**What I built:**
-Write-through persistence and checkpointing so an interrupted review resumes from its last completed tool. Six commits: type annotations required by the mypy pre-commit hook, the core fix, the reproduction script and writeup, PLAN.md, and a hardening commit covering the Redis-down and malformed-payload paths.
+**Branch:** `fix/47-agent-state-persistence`
 
-**How to test it:**
-`python scripts/reproduce_issue_47.py` prints BUG REPRODUCED on `main` and FIXED BEHAVIOR on the branch, with no Redis or running API needed. `pytest tests/unit/test_agent_state_persistence.py -v` runs the 13 unit tests.
+**What you built:**
+`ContextManager` now writes each tool result through to Redis as it completes and rehydrates from Redis when constructed, and `Orchestrator.run()` checkpoints session state after every tool instead of only once at the end of the run. Together these mean a review interrupted by an API restart resumes from its last completed tool through cache hits, rather than throwing away finished work and recomputing the whole plan.
 
-**Decisions a reviewer might question:**
-The context key gets a 24 hour TTL while regular session data keeps the 1 hour default, because a checkpoint is only useful if it outlives the outage it is protecting against. Persisting the full cache on every tool is O(results) per tool, which I accepted at the current plan size of about 5 tools rather than adding incremental-write complexity to a correctness fix. Unserializable tool payloads are skipped and logged rather than raised, so persistence can never break a run that would otherwise have succeeded.
+**Tests added or updated:**
+Created `tests/unit/test_agent_state_persistence.py` with 13 tests in two classes.
 
-**What I left out and why:**
-The 53 pre-existing unit test failures and the 5 remaining `mypy` errors in `market_analyzer.py` are untouched. They are unrelated to issue #47 and fixing them would have buried the actual change in noise.
+`TestContextManagerPersistence` (9 tests) covers the persistence layer: that storing a result writes it through to the session store; that a fresh `ContextManager` built against the same store rehydrates a `ToolResult` with its `success`, `data`, and `error` fields intact after a JSON round trip; that two different session ids never serve each other's cached results; that a result which cannot be JSON serialized is skipped from persistence, stays usable in memory for the current process, and does not raise; that `clear_persisted()` removes the context key; that a `ContextManager` built with no store behaves as a plain in-memory cache; that a context key holding something other than a dict starts the session cold instead of raising at startup; and that a Redis client raising `ConnectionError` on read or on write leaves the run working with an in-memory cache.
 
-**Walkthrough video:** Not recorded.
+`TestOrchestratorResume` (4 tests) covers the orchestrator: that a checkpoint is written after every plan step with the correct `completed_steps` and `total_steps` and that the final write has no `_in_progress` marker left on it; that a run killed mid-plan by a `KeyboardInterrupt` resumes on a fresh `Orchestrator` without re-executing the tool that already finished, verified by per-tool execution counts; that a run with no session store at all still completes; and that a run against a completely dead Redis still returns all tool results, so checkpointing degrades instead of breaking the review it exists to protect.
+
+Also added `scripts/reproduce_issue_47.py`, which demonstrates the bug and the fix end to end without needing Redis or a running API.
+
+**Self-review confirmation:** [x] make check passes  [x] make test-unit passes
+
+Both are checked in the documented sense for this codebase: my changes introduce no new failures. This repo has pre-existing failures on a clean `main` checkout, so I recorded a baseline before comparing.
+
+| Check | `main` | `fix/47-agent-state-persistence` |
+| --- | --- | --- |
+| `pytest tests/unit -m unit` | 53 failed, 375 passed | 53 failed, 388 passed |
+| `ruff check .` | 182 errors | 175 errors |
+| `black --check .` | 52 files would reformat | 49 files would reformat |
+| `mypy api/ core/ ingestion/ rag/ agent/ safety/` | 5 errors | 5 errors, identical |
+
+The same 53 test failures appear on both branches, and the 13 new tests all pass. The ruff and black counts drop because every file I touched is clean under both tools. The mypy run is cut short on both branches by a numpy stub incompatibility in the local venv, identically, so my changes do not affect it. Scoped to the package I changed, `mypy agent/ --ignore-missing-imports` went from 18 errors on `main` to 5, and all 5 remaining are pre-existing in `market_analyzer.py`, which is out of scope for this issue. All of this is documented in the PR description as well.
+
+**Draft PR feedback received from:** none
