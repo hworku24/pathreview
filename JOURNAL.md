@@ -93,3 +93,42 @@ Both are checked in the documented sense for this codebase: my changes introduce
 The same 53 test failures appear on both branches, and the 13 new tests all pass. The ruff and black counts drop because every file I touched is clean under both tools. The mypy run is cut short on both branches by a numpy stub incompatibility in the local venv, identically, so my changes do not affect it. Scoped to the package I changed, `mypy agent/ --ignore-missing-imports` went from 18 errors on `main` to 5, and all 5 remaining are pre-existing in `market_analyzer.py`, which is out of scope for this issue. All of this is documented in the PR description as well.
 
 **Draft PR feedback received from:** none
+
+---
+
+## Week 10 — Iteration & reflection
+
+### Reviewer feedback
+
+**Feedback received:** [ ] Yes  [x] No — still awaiting review
+
+**Summary of feedback:**
+No review came in. PR #696 (https://github.com/ascherj/pathreview/pull/696) has been open on `ascherj/pathreview` since August 3 and is still in the `OPEN` state with zero review comments and zero issue comments as of August 11. No maintainer has approved the workflow run either, so the CI checks on the PR are still sitting unstarted, which is the same state every fork PR on this repo lands in.
+
+**How you responded:**
+Nothing to respond to. The branch is unchanged since submission and stays mergeable against `main`. If a reviewer does comment later, the two places I would expect questions are the 24 hour `CONTEXT_TTL_SECONDS` I chose for the context key and the decision to write the whole cache on every tool completion, and I have the reasoning for both written up in the "Week 9 resolutions" section of `PLAN.md`.
+
+---
+
+### Reflection
+
+**What was harder than you expected?**
+The hardest part had nothing to do with the fix. It was proving the fix was safe. I assumed I would write the code, run `make check` and `pytest tests/unit`, and read a green result. On a clean `main` checkout this repo already fails with 53 unit test failures, 182 ruff errors, and 52 files that black wants to reformat, so "my tests pass" meant nothing on its own. I had to stop, check out `main`, record every count, then run the same four commands on my branch and put both columns in a table before I could honestly claim I had not regressed anything.
+
+Reproduction was the second surprise. The orchestrator is not wired into any route in `api/`, so there was no way to start a review in the running app and kill the server halfway through. I ended up writing `scripts/reproduce_issue_47.py` to simulate the crash and the restart in one process, which took longer than I expected but gave me a check I could run on both branches and paste directly into the PR.
+
+**What did you learn about working in a large codebase?**
+Most of my design decisions were set by code I did not write. `SessionStore` ships with a 3600 second default TTL, and my first thought was to raise it. That would have changed the expiry behavior for every other caller of `set()` to fix one key, so I added `CONTEXT_TTL_SECONDS = 24 * 3600` in `context_manager.py` and pass it explicitly on each persist call, leaving the shared default alone. Same story with the constructor: `ContextManager()` is called with no arguments elsewhere, so `session_store` and `session_id` both had to be optional and the no-store path had to stay a plain in-memory cache.
+
+The other habit I picked up is checking before assuming. I had "key collisions" written down as a risk in `PLAN.md` because I assumed the API layer read session data. Grepping `api/` and `core/` for `SessionStore` and `session_store` returned no call sites at all, which closed the risk in about two minutes. In my own projects I know every reader of a value because I wrote them all. Here I had to go find out, and the answer changed the scope of what I needed to test.
+
+**How did AI tools help — and where did they fall short?**
+AI was most useful for reading speed and for test scaffolding. It got me oriented in `agent/orchestrator.py` and `agent/memory/context_manager.py` quickly, and it helped me build the fake `SessionStore` that the 13 tests in `test_agent_state_persistence.py` run against, along with the dead-Redis client that raises `ConnectionError` on every call.
+
+It fell short in three specific ways. First, it kept treating a passing test run as proof my change was clean, and never suggested baselining a repo that is already red. That table in my Week 9 check-in exists because I went looking, not because a tool told me to. Second, when I raised the TTL problem, the first suggestion was to change the default in `session_store.py`, which is the version of the fix that quietly affects every other session write. Third, the design questions were mine to answer. Whether an interrupted tool should resume half-finished work or re-run from the start is a judgment call about what the agent guarantees, and no tool was going to make it for me. I also hit a real bug on my own: `is_dataclass()` returns true for a dataclass class object and not only an instance, which broke `_serialize()` until I added the `isinstance(result, type)` guard.
+
+**What would you do differently if you started over?**
+I would record the baseline in Week 8, during reproduction, not in Week 9 while trying to finish the PR. Knowing on day one that `main` fails 53 tests would have saved me a stretch of debugging failures that were never mine. I would also check how an issue's code path is reachable from the running app before claiming it. Issue #47 was a good pick technically, but the orchestrator being unreachable from any route meant I could never demo the fix in the UI, and I only learned that after I had committed to the issue. Smaller one: I skipped the walkthrough video in Week 8 and should have recorded it, since it was the cheapest way to show the before and after to someone who is not going to run my script.
+
+**What are you most proud of from this module?**
+The failure-path tests. A persistence layer that raises when Redis is down or when a tool payload will not serialize would break the exact runs it was added to protect, which is worse than the bug in the issue. So `_serialize()` skips and logs anything `json.dumps` rejects while the value stays usable in memory for the current process, `_hydrate()` starts the session cold if the stored payload is not a dict, and there are tests driving a Redis client that raises `ConnectionError` on read, on write, and across a full orchestrator run, all asserting the review still finishes. Nobody asked for that in the issue. I added it because I worked out what my change could break, and it is the part of the PR I would most want a reviewer to look at.
